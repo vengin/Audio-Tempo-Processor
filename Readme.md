@@ -12,6 +12,7 @@ A Python GUI application for audio files batch processssing, changing their temp
 - Supports multiple audio formats (MP3, M4A, M4B, WAV, OGG, FLAC)
 - Dynamic progress tracking for individual files and overall progress, based on processed time feedback from FFMPEG
 - Configurable file overwrite behavior (Skip/Overwrite/Rename)
+- Optional processing of the current folder only (skipping subfolders)
 - Settings persistence between sessions (saves its configuration in config file)
 
 ## Requirements
@@ -37,6 +38,7 @@ The application saves its configuration in `tempo_config.ini` file, which includ
 - Number of processing threads
 - Overwrite options
 - Compression settings
+- Process current folder only preference
 
 ## Usage
 
@@ -60,6 +62,7 @@ The application saves its configuration in `tempo_config.ini` file, which includ
   - \> 1: Faster playback
 - **Threads**: 1-DFLT_N_THREADS_MAX concurrent processing threads
 - **Compression**: Optional audio compression to reduce file size
+- **Process Current Folder Only**: If checked, subdirectories in the source folder are ignored
 - **Overwrite Options**:
   - Skip: Preserve existing files
   - Overwrite: Replace existing files

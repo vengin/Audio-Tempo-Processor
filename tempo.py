@@ -26,6 +26,7 @@ DFLT_LOG_FILE = "tempo.log"
 AUD_EXT = ('.mp3', '.m4a', 'm4b', '.wav', '.ogg', '.flac', '.wav')
 DFLT_OVERWRITE_OPTION = "Skip existing files"  # Skip by default
 DFLT_USE_COMPRESSION_OPTION = False  # No compression by default
+DFLT_PROCESS_CURRENT_FOLDER_ONLY = False # Process subfolders by default
 GUI_TIMEOUT = 0.3 # in seconds
 UPDATE_STATUS_TIMEOUT = 1 # in seconds
 
@@ -110,6 +111,7 @@ class AudioProcessor:
     self.run_button = None
     self.overwrite_options = tk.StringVar(value=DFLT_OVERWRITE_OPTION)
     self.use_compression_var = tk.BooleanVar(value=DFLT_USE_COMPRESSION_OPTION)
+    self.process_current_folder_var = tk.BooleanVar(value=DFLT_PROCESS_CURRENT_FOLDER_ONLY)
 
     # Initialize GUI variables as empty
     self.ffmpeg_path = tk.StringVar()
@@ -182,6 +184,7 @@ class AudioProcessor:
         'n_threads': str(DFLT_N_THREADS),
         'overwrite_option': DFLT_OVERWRITE_OPTION,  # Skip by default
         'use_compression': str(DFLT_USE_COMPRESSION_OPTION),
+        'process_current_folder_only': str(DFLT_PROCESS_CURRENT_FOLDER_ONLY),
       }
     else:
       try:
@@ -192,6 +195,7 @@ class AudioProcessor:
         self.dst_dir.set(self.config['DEFAULT'].get('dst_dir', DFLT_DST_DIR))
         self.n_threads.set(int(self.config['DEFAULT'].get('n_threads', str(DFLT_N_THREADS))))
         self.use_compression_var.set(self.config['DEFAULT'].get('use_compression', DFLT_USE_COMPRESSION_OPTION).lower())
+        self.process_current_folder_var.set(self.config['DEFAULT'].get('process_current_folder_only', str(DFLT_PROCESS_CURRENT_FOLDER_ONLY)).lower() == 'true')
         self.overwrite_options.set(self.config['DEFAULT'].get('overwrite_option', DFLT_OVERWRITE_OPTION))
       except Exception as e:
         messagebox.showerror("Config Error", f"Could not load config file: {e}")
@@ -211,6 +215,7 @@ class AudioProcessor:
     self.config['DEFAULT']['dst_dir'] = self.dst_dir.get()
     self.config['DEFAULT']['overwrite_option'] = self.overwrite_options.get()
     self.config['DEFAULT']['use_compression'] = str(self.use_compression_var.get()).lower()
+    self.config['DEFAULT']['process_current_folder_only'] = str(self.process_current_folder_var.get()).lower()
     try:
       with open(DFLT_CONFIG_FILE, 'w') as configfile:
         self.config.write(configfile)
@@ -251,6 +256,9 @@ class AudioProcessor:
 
     # Compression Checkbox
     ttk.Checkbutton(self.master, text="Use compression", variable=self.use_compression_var).grid(row=5, column=0, sticky=tk.W, padx=5)
+
+    # Process Current Folder Only Checkbox
+    ttk.Checkbutton(self.master, text="Process current folder only", variable=self.process_current_folder_var).grid(row=5, column=1, sticky=tk.W, padx=5)
 
     # Run button
     self.run_button = tk.Button(self.master, text="Run", command=self.start_processing, state=tk.NORMAL, height=2, width=20)
@@ -604,7 +612,11 @@ class AudioProcessor:
 
     last_update_time = time.time()
 
-    for root, _, files in os.walk(src_dir):
+    for root, dirs, files in os.walk(src_dir):
+      # If processing only current folder, clear dirs so os.walk doesn't traverse deeper
+      if self.process_current_folder_var.get():
+        dirs[:] = []
+
       for file in files:
         if file.lower().endswith(AUD_EXT):
           full_path = os.path.join(root, file)
