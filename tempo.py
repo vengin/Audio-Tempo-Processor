@@ -129,7 +129,8 @@ class AudioProcessor:
     self.progress_bars_idx = []
     self.active_threads = 0
     self.total_files = 0
-    self.processed_files = 0
+    self.files_completed_attempt = 0
+    self.successfully_converted_files = 0
     self.processed_files_lock = threading.Lock()  # Lock for thread-safe access
     self.processed_seconds_arr = {}
     self.processed_seconds_arr_lock = threading.Lock()  # Lock for thread-safe access
@@ -463,7 +464,8 @@ class AudioProcessor:
     finally:
       progress_bar.set_progress(100)
       with self.processed_files_lock:
-        self.processed_files += 1
+        self.successfully_converted_files += 1 # Only for successful conversions
+        self.files_completed_attempt += 1 # Any file that finishes its worker processing path
       self.master.update_idletasks()
       stderr_thread.join()
     return
@@ -489,7 +491,7 @@ class AudioProcessor:
       total_progress_percentage = min(100, total_progress_percentage)
       logging.debug(f"ttl_prcssd_seconds={int(total_processed_seconds)}, ttl_seconds={int(self.total_dst_seconds)}, prgrss={total_progress_percentage}")
 
-      total_progress_message = f"{total_progress_percentage}%  {self.processed_files+self.skipped_files}/{self.total_files}"
+      total_progress_message = f"{total_progress_percentage}%  {self.files_completed_attempt}/{self.total_files}"
 
       # Wrap GUI updates in try-except
       try:
@@ -500,8 +502,8 @@ class AudioProcessor:
         return
 
       # When all files processed, set progress to 100% (might be a bit smaller/larger otherwise)
-      if self.processed_files == self.total_files:
-        total_progress_message = f"100%  {self.processed_files+self.skipped_files}/{self.total_files}"
+      if self.files_completed_attempt == self.total_files:
+        total_progress_message = f"100%  {self.files_completed_attempt}/{self.total_files}"
         self.total_progress.set_progress(100)
         self.total_progress.set_display_text(total_progress_message)
         try:
@@ -528,8 +530,9 @@ class AudioProcessor:
         progress_bar.set_display_text(f"Error: {relative_path}")
         progress_bar.set_progress(100)
         with self.processed_files_lock:
-          self.processed_files += 1 # Count as processed (unsuccessfully)
+          self.files_completed_attempt += 1 # Count as completed attempt (unsuccessfully)
         self.error_files += 1 # Increment error count once
+        self.update_total_progress() # Update total progress immediately for errored files
         return  # Do not process errored files
 
       # Check if file should be skipped
@@ -537,7 +540,8 @@ class AudioProcessor:
         progress_bar.set_display_text(f"Skipping: {relative_path}") # More explicit message
         progress_bar.set_progress(100)
         with self.processed_files_lock:
-          self.processed_files += 1 # Count as processed (skipped)
+          self.files_completed_attempt += 1 # Count as completed attempt (skipped)
+        self.update_total_progress() # Update total progress immediately for skipped files
         return  # Do not process skipped files
 
       dst_file_path = os.path.join(self.dst_dir.get(), relative_path)
@@ -586,6 +590,8 @@ class AudioProcessor:
       logging.exception(msg)
       self.status_update_queue.put(msg)
       self.error_files += 1
+      with self.processed_files_lock:
+        self.files_completed_attempt += 1 # Count as completed attempt (with error)
       raise
     finally:
       # Ensure process is removed from active processes even if error occurs
@@ -805,7 +811,8 @@ class AudioProcessor:
 
     self.processing_complete = False
     self.active_threads = 0
-    self.processed_files = 0
+    self.files_completed_attempt = 0
+    self.successfully_converted_files = 0
     self.skipped_files = 0
     self.error_files = 0
     self.processed_files_set.clear()
@@ -898,7 +905,7 @@ class AudioProcessor:
 
     # Example msg: "3 Files Total: 1 processed, 1 Skipped, 1 Error. Compression ratio  3.95"
     # Add Total and Processed files
-    msg = f"{self.total_files} Files Total: {self.processed_files} Processed"
+    msg = f"{self.total_files} Files Total: {self.successfully_converted_files} Processed"
     # Add non-zero Skipped files
     if self.skipped_files:
       msg += f", {self.skipped_files} Skipped"
@@ -920,7 +927,7 @@ class AudioProcessor:
 
     # 100%
     if hasattr(self, 'total_progress'):
-      total_progress_message = f"100%  {self.processed_files+self.skipped_files}/{self.total_files}"
+      total_progress_message = f"100%  {self.files_completed_attempt}/{self.total_files}"
       self.total_progress.set_progress(100)
       self.total_progress.set_display_text(total_progress_message)
 
