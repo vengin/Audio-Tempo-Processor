@@ -521,11 +521,23 @@ class AudioProcessor:
     self.processed_files_set.add(relative_path)
     process = None  # Define process outside try block
     try:
+      file_data = self.file_info[relative_path]
+
+      # Check if file was errored during metadata gathering
+      if file_data["errored"]:
+        progress_bar.set_display_text(f"Error: {relative_path}")
+        progress_bar.set_progress(100)
+        with self.processed_files_lock:
+          self.processed_files += 1 # Count as processed (unsuccessfully)
+        self.error_files += 1 # Increment error count once
+        return  # Do not process errored files
 
       # Check if file should be skipped
-      if self.file_info[relative_path]["skipped"]:
-        progress_bar.set_display_text(relative_path)
+      if file_data["skipped"]:
+        progress_bar.set_display_text(f"Skipping: {relative_path}") # More explicit message
         progress_bar.set_progress(100)
+        with self.processed_files_lock:
+          self.processed_files += 1 # Count as processed (skipped)
         return  # Do not process skipped files
 
       dst_file_path = os.path.join(self.dst_dir.get(), relative_path)
@@ -631,22 +643,23 @@ class AudioProcessor:
           dst_file_path = os.path.join(self.dst_dir.get(), dst_relative_path_base + '.mp3')
           if os.path.exists(dst_file_path) and overwrite_option == "Skip existing files":
             self.skipped_files += 1
-            self.file_info[relative_path] = {"duration": 0, "skipped": True}
+            self.file_info[relative_path] = {"duration": 0, "skipped": True, "errored": False}
             self.total_src_sz -= os.path.getsize(full_path)  # Exclude skipped file size from total
           else:
             # Get audio file metadata and calculate size
             duration, success = self.get_metadata_info(self.ffmpeg_path.get(), full_path)
             if success:
               duration_tempo = duration/self.tempo.get()
-              self.file_info[relative_path] = {"duration": duration_tempo, "skipped": False}
+              self.file_info[relative_path] = {"duration": duration_tempo, "skipped": False, "errored": False}
               # logging.debug(f"{relative_path}: dst_est_sz_kbt={dst_est_sz_kbt}")
               dst_seconds = int(duration_tempo)
               self.total_dst_seconds += dst_seconds
               logging.debug(f"{relative_path}: dst_seconds={dst_seconds}")
 
             else:
-              logging.error(f"Could not get audio file metadata for {full_path}")
-              self.error_files += 1
+              logging.error(f"Could not get audio file metadata for {full_path}. Marking as errored.")
+              self.file_info[relative_path] = {"duration": 0, "skipped": False, "errored": True}
+              # self.error_files will be incremented in process_file if this file is picked up for processing
 
           # Update the status_text every second, replacing text (instead of adding new lines)
           current_time = time.time()
@@ -794,6 +807,7 @@ class AudioProcessor:
     self.active_threads = 0
     self.processed_files = 0
     self.skipped_files = 0
+    self.error_files = 0
     self.processed_files_set.clear()
 
     # Remove existing progress bars, before creating new ones
