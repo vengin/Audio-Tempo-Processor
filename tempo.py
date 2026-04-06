@@ -27,6 +27,7 @@ AUD_EXT = ('.mp3', '.m4a', 'm4b', '.wav', '.ogg', '.flac', '.wav')
 DFLT_OVERWRITE_OPTION = "Skip existing files"  # Skip by default
 DFLT_USE_COMPRESSION_OPTION = False  # No compression by default
 DFLT_PROCESS_CURRENT_FOLDER_ONLY = False # Process subfolders by default
+DFLT_PRESERVE_TIMESTAMPS = True
 GUI_TIMEOUT = 0.3 # in seconds
 UPDATE_STATUS_TIMEOUT = 1 # in seconds
 
@@ -112,6 +113,7 @@ class AudioProcessor:
     self.overwrite_options = tk.StringVar(value=DFLT_OVERWRITE_OPTION)
     self.use_compression_var = tk.BooleanVar(value=DFLT_USE_COMPRESSION_OPTION)
     self.process_current_folder_var = tk.BooleanVar(value=DFLT_PROCESS_CURRENT_FOLDER_ONLY)
+    self.preserve_timestamps = tk.BooleanVar(value=DFLT_PRESERVE_TIMESTAMPS)
 
     # Initialize GUI variables as empty
     self.ffmpeg_path = tk.StringVar()
@@ -186,6 +188,7 @@ class AudioProcessor:
         'overwrite_option': DFLT_OVERWRITE_OPTION,  # Skip by default
         'use_compression': str(DFLT_USE_COMPRESSION_OPTION),
         'process_current_folder_only': str(DFLT_PROCESS_CURRENT_FOLDER_ONLY),
+        'preserve_timestamps': str(DFLT_PRESERVE_TIMESTAMPS),
       }
     else:
       try:
@@ -198,6 +201,8 @@ class AudioProcessor:
         self.use_compression_var.set(self.config['DEFAULT'].get('use_compression', DFLT_USE_COMPRESSION_OPTION).lower())
         self.process_current_folder_var.set(self.config['DEFAULT'].get('process_current_folder_only', str(DFLT_PROCESS_CURRENT_FOLDER_ONLY)).lower() == 'true')
         self.overwrite_options.set(self.config['DEFAULT'].get('overwrite_option', DFLT_OVERWRITE_OPTION))
+        pt_val = self.config['DEFAULT'].getboolean('preserve_timestamps', DFLT_PRESERVE_TIMESTAMPS)
+        self.preserve_timestamps.set(pt_val)
       except Exception as e:
         messagebox.showerror("Config Error", f"Could not load config file: {e}")
 
@@ -217,6 +222,7 @@ class AudioProcessor:
     self.config['DEFAULT']['overwrite_option'] = self.overwrite_options.get()
     self.config['DEFAULT']['use_compression'] = str(self.use_compression_var.get()).lower()
     self.config['DEFAULT']['process_current_folder_only'] = str(self.process_current_folder_var.get()).lower()
+    self.config['DEFAULT']['preserve_timestamps'] = str(self.preserve_timestamps.get())
     try:
       with open(DFLT_CONFIG_FILE, 'w') as configfile:
         self.config.write(configfile)
@@ -247,13 +253,19 @@ class AudioProcessor:
     self.n_threads_combo = ttk.Combobox(self.master, textvariable=self.n_threads, values=n_thread_values, width=3, state="readonly")
     self.n_threads_combo.grid(row=3, column=1, sticky=tk.W)
 
-    # Overwrite choice
-    ttk.Label(self.master, text="File Overwrite Options:").grid(row=4, column=0, sticky=tk.W, padx=5)
-    self.overwrite_options_combobox = ttk.Combobox(self.master,
+    # File options in row 4
+    ttk.Label(self.master, text="File Options:").grid(row=4, column=0, sticky=tk.W, padx=5)
+    file_opts_frame = ttk.Frame(self.master)
+    file_opts_frame.grid(row=4, column=1, sticky=tk.W)
+
+    self.overwrite_options_combobox = ttk.Combobox(file_opts_frame,
       textvariable=self.overwrite_options,
       values=[ "Skip existing files", "Overwrite existing files", "Rename existing files"],
       state="readonly")
-    self.overwrite_options_combobox.grid(row=4, column=1, sticky=tk.W)
+    self.overwrite_options_combobox.pack(side=tk.LEFT)
+
+    self.preserve_timestamps_cb = ttk.Checkbutton(file_opts_frame, text="Preserve Original Modification Time", variable=self.preserve_timestamps)
+    self.preserve_timestamps_cb.pack(side=tk.LEFT, padx=(20, 0))
 
     # Compression Checkbox
     ttk.Checkbutton(self.master, text="Use compression", variable=self.use_compression_var).grid(row=5, column=0, sticky=tk.W, padx=5)
@@ -599,6 +611,18 @@ class AudioProcessor:
 
       # Monitor and update each audio file processing progress
       self.monitor_progress(process, progress_bar, dst_time, relative_path)
+
+      # Preserve modification time if enabled and process finished successfully
+      if self.preserve_timestamps.get() and not self.is_shutting_down and process.poll() == 0:
+        try:
+          original_mtime = os.stat(src_file_path).st_mtime
+          # Use current access time of the destination file
+          current_atime = os.stat(final_dst_path).st_atime
+          os.utime(final_dst_path, (current_atime, original_mtime))
+          logging.info(f"Preserved modification time for {relative_path}")
+        except Exception as e:
+          logging.warning(f"Failed to preserve modification time for {relative_path}: {e}")
+
       self.master.update_idletasks()
 
       # Remove process from active processes list
@@ -633,7 +657,7 @@ class AudioProcessor:
     # Only count files that were actually processed in this session
     for dst_file_path in self.processed_dst_files_set:
       if os.path.exists(dst_file_path):
-        self.total_dst_sz += os.path.getsize(dst_file_path)
+        self.total_dst_sz += os.stat(dst_file_path).st_size
         n_files += 1
 
 
@@ -662,7 +686,8 @@ class AudioProcessor:
           relative_path = os.path.relpath(full_path, src_dir)
           self.queue.put((full_path, relative_path))
           self.total_files += 1
-          self.total_src_sz += os.path.getsize(full_path)
+          file_stat = os.stat(full_path)
+          self.total_src_sz += file_stat.st_size
 
           # Skip existing files
           overwrite_option = self.overwrite_options.get()
@@ -671,7 +696,7 @@ class AudioProcessor:
           if os.path.exists(dst_file_path) and overwrite_option == "Skip existing files":
             self.skipped_files += 1
             self.file_info[relative_path] = {"duration": 0, "skipped": True, "errored": False}
-            self.total_src_sz -= os.path.getsize(full_path)  # Exclude skipped file size from total
+            self.total_src_sz -= file_stat.st_size  # Exclude skipped file size from total
           else:
             # Get audio file metadata and calculate size
             duration, success = self.get_metadata_info(self.ffmpeg_path.get(), full_path)
