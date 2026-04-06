@@ -29,6 +29,7 @@ DFLT_USE_COMPRESSION_OPTION = False  # No compression by default
 DFLT_PROCESS_CURRENT_FOLDER_ONLY = False # Process subfolders by default
 GUI_TIMEOUT = 0.3 # in seconds
 UPDATE_STATUS_TIMEOUT = 1 # in seconds
+THREAD_PROGRESS_TIMEOUT = 30  # seconds (0 to disable)
 
 
 #############################################################################
@@ -41,6 +42,7 @@ class CustomProgressBar(tk.Canvas):
     super().__init__(master, *args, **kwargs)
     self.progress_var = tk.DoubleVar()
     self.filename_var = tk.StringVar()
+    self.cancelled = tk.BooleanVar(value=False)
 
     # Set bald font based on parameter
     self.text_font = ('TkDefaultFont', 9, 'bold') if use_bold_font else ('TkDefaultFont', 9)
@@ -71,7 +73,10 @@ class CustomProgressBar(tk.Canvas):
 
     # Draw progress fill inside the border
     if fill_width > 0:
-      self.create_rectangle(2, 2, fill_width+2, height-2, fill="#A8D8A8")#, outline="")
+      fill_color = "#A8D8A8"  # Default green
+      if hasattr(self, 'cancelled') and self.cancelled.get():
+        fill_color = "#FF9999"  # Red for cancelled
+      self.create_rectangle(2, 2, fill_width+2, height-2, fill=fill_color)#, outline="")
 
     # Draw centered text
     self.create_text(
@@ -94,6 +99,15 @@ class CustomProgressBar(tk.Canvas):
   def set_display_text(self, display_text):
     """Sets the display text (filename) and redraws the bar."""
     self.filename_var.set(display_text)
+    self.draw_progress_bar()
+
+
+  #############################################################################
+  def prepare_new_file(self, display_text):
+    """Prepares the progress bar for a new file by resetting its state."""
+    self.filename_var.set(display_text)
+    self.progress_var.set(0)
+    self.cancelled.set(False)
     self.draw_progress_bar()
 
 
@@ -140,6 +154,7 @@ class AudioProcessor:
     self.total_src_sz = 0
     self.error_files = 0
     self.skipped_files = 0
+    self.cancelled_files = 0
     self.status_text = None
     self.start_time = None
     self.use_compression = False
@@ -420,6 +435,16 @@ class AudioProcessor:
     """Monitors FFMPEG progress for each audio file and updates the progress bar."""
     q = queue.Queue()
 
+    def read_stdout(p, q):
+      try:
+        while True:
+          line = p.stdout.readline()
+          if not line:
+            break
+          q.put(('stdout', line))
+      finally:
+        q.put(('stdout', None))
+
     def read_stderr(p, q):
       try:
         # Open stderr in binary mode
@@ -434,28 +459,43 @@ class AudioProcessor:
                 line = line.decode('utf-8', errors='replace')
               except UnicodeDecodeError:
                 line = line.decode('cp1251', errors='replace')
-            q.put(line)
+            q.put(('stderr', line))
           except Exception as e:
             logging.error(f"Error decoding line: {e}")
             continue
       except Exception as e:
         logging.error(f"Error reading stderr: {e}")
       finally:
-        q.put(None)
+        q.put(('stderr', None))
 
-    # Create process with binary output
+    stdout_thread = threading.Thread(target=read_stdout, args=(process, q))
+    stdout_thread.daemon = True
+    stdout_thread.start()
+
     stderr_thread = threading.Thread(target=read_stderr, args=(process, q))
     stderr_thread.daemon = True
     stderr_thread.start()
 
+    last_change_time = time.time()
+    last_processed_sec = -1
+    stdout_done = False
+    stderr_done = False
+
     try:
       while True:
         try:
-          line = q.get(timeout=GUI_TIMEOUT)
+          stream, line = q.get(timeout=GUI_TIMEOUT)
           if line is None:
-            break
+            if stream == 'stdout': stdout_done = True
+            if stream == 'stderr': stderr_done = True
+            if stdout_done and stderr_done:
+              break
+            continue
 
-          # Example output to parse:
+          # Any activity from FFmpeg (stdout or stderr) resets the timeout clock
+          last_change_time = time.time()
+
+          # Example output to parse (usually in stderr for stats):
           # size=    2560KiB time=00:07:47.20 bitrate=  44.9kbits/s speed= 226x
           match = re.search(r"time=(?P<hours>\d{2}):(?P<minutes>\d{2}):(?P<seconds>\d{2})\.(?P<milliseconds>\d{2})", line)
           if match:
@@ -466,13 +506,17 @@ class AudioProcessor:
               int(match['seconds']) +
               int(match['milliseconds']) / 100.0  # Convert milliseconds to a fraction of a second
             )
+
+            if processed_seconds != last_processed_sec:
+                last_processed_sec = processed_seconds
+
             with self.processed_seconds_arr_lock:
               self.processed_seconds_arr[relative_path] = processed_seconds #Store by filename
             progress = min(100, (processed_seconds / dst_time) * 100) if dst_time > 0 else 0 # Do not exceed 100%
             progress_bar.set_progress(progress)
             self.master.update_idletasks()
 
-            self.update_total_progress()
+            self.update_total_progress(relative_path)
             time.sleep(GUI_TIMEOUT)
 
         except queue.Empty:
@@ -480,12 +524,27 @@ class AudioProcessor:
             break
           time.sleep(GUI_TIMEOUT)
 
+        # Check for timeout
+        if getattr(progress_bar, 'paused', None) and progress_bar.paused.get():
+          last_change_time = time.time()
+        elif THREAD_PROGRESS_TIMEOUT > 0 and time.time() - last_change_time > THREAD_PROGRESS_TIMEOUT:
+          process.kill()
+          progress_bar.cancelled.set(True)
+          raise TimeoutError(f"Processing timeout. No progress for {THREAD_PROGRESS_TIMEOUT} seconds.")
+
+    except TimeoutError:
+      # TimeoutError will be logged/handled by the caller (process_file)
+      raise
     except Exception as e:
-      logging.exception(f"Error monitoring progress for {relative_path}: {e}")
+      logging.exception(f"Unexpected error monitoring progress for {relative_path}: {e}")
+      raise
     finally:
-      progress_bar.set_progress(100)
+      if hasattr(progress_bar, 'cancelled') and not progress_bar.cancelled.get():
+        progress_bar.set_progress(100)
+        with self.processed_files_lock:
+          self.successfully_converted_files += 1 # Only for successful conversions
+
       with self.processed_files_lock:
-        self.successfully_converted_files += 1 # Only for successful conversions
         self.files_completed_attempt += 1 # Any file that finishes its worker processing path
       self.master.update_idletasks()
       stderr_thread.join()
@@ -493,7 +552,7 @@ class AudioProcessor:
 
 
   #############################################################################
-  def update_total_progress(self):
+  def update_total_progress(self, relative_path=None):
     """Updates the total progress bar based on cumulative processed size."""
     if self.is_shutting_down:
       return
@@ -510,7 +569,10 @@ class AudioProcessor:
         total_processed_seconds = sum(self.processed_seconds_arr.values())
       total_progress_percentage = int((total_processed_seconds / self.total_dst_seconds) * 100) if self.total_dst_seconds > 0 else 0
       total_progress_percentage = min(100, total_progress_percentage)
-      logging.debug(f"ttl_prcssd_seconds={int(total_processed_seconds)}, ttl_seconds={int(self.total_dst_seconds)}, prgrss={total_progress_percentage}")
+      if relative_path:
+        logging.debug(f"{relative_path}: ttl_prcssd_seconds={int(total_processed_seconds)}, ttl_seconds={int(self.total_dst_seconds)}, prgrss={total_progress_percentage}")
+      else:
+        logging.debug(f"ttl_prcssd_seconds={int(total_processed_seconds)}, ttl_seconds={int(self.total_dst_seconds)}, prgrss={total_progress_percentage}")
 
       total_progress_message = f"{total_progress_percentage}%  {self.files_completed_attempt}/{self.total_files}"
 
@@ -553,7 +615,7 @@ class AudioProcessor:
         with self.processed_files_lock:
           self.files_completed_attempt += 1 # Count as completed attempt (unsuccessfully)
         self.error_files += 1 # Increment error count once
-        self.update_total_progress() # Update total progress immediately for errored files
+        self.update_total_progress(relative_path) # Update total progress immediately for errored files
         return  # Do not process errored files
 
       # Check if file should be skipped
@@ -562,7 +624,7 @@ class AudioProcessor:
         progress_bar.set_progress(100)
         with self.processed_files_lock:
           self.files_completed_attempt += 1 # Count as completed attempt (skipped)
-        self.update_total_progress() # Update total progress immediately for skipped files
+        self.update_total_progress(relative_path) # Update total progress immediately for skipped files
         return  # Do not process skipped files
 
       dst_file_path = os.path.join(self.dst_dir.get(), relative_path)
@@ -574,14 +636,14 @@ class AudioProcessor:
       final_dst_path = base + ".mp3"
 
       # Add the actual destination file path to the set
-      self.processed_dst_files_set.add(final_dst_path)
+      self.processed_dst_files_set.add((src_file_path, final_dst_path))
 
       # Get pre-calculated file info
       file_data = self.file_info[relative_path]
       dst_time = file_data["duration"]
 
       # Display processed filename in progress bar
-      progress_bar.set_display_text(os.path.basename(dst_file_path))
+      progress_bar.prepare_new_file(os.path.basename(dst_file_path))
 
       # Generate ffmpeg command with tempo and optional compression
       ffmpeg_command = self.generate_ffmpeg_command(src_file_path, dst_file_path)
@@ -613,6 +675,26 @@ class AudioProcessor:
       self.error_files += 1
       with self.processed_files_lock:
         self.files_completed_attempt += 1 # Count as completed attempt (with error)
+
+      # Wait briefly to ensure ffmpeg process has fully terminated and released the file handle
+      if process:
+        try:
+          if hasattr(process, 'wait'):
+             process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+          pass
+
+      # Auto-remove the invalid/incomplete output file
+      try:
+        # Note: final_dst_path is used instead of dst_file_path to ensure correct extension
+        if 'final_dst_path' in locals() and os.path.exists(final_dst_path):
+          os.remove(final_dst_path)
+          rm_msg = f"Removed incomplete file: {final_dst_path}"
+          logging.info(rm_msg)
+          self.status_update_queue.put(rm_msg)
+      except Exception as rm_e:
+        logging.warning(f"Failed to remove incomplete file {final_dst_path}: {rm_e}")
+
       raise
     finally:
       # Ensure process is removed from active processes even if error occurs
@@ -621,19 +703,21 @@ class AudioProcessor:
         if process in self.active_processes:
           self.active_processes.remove(process)
       if not self.is_shutting_down:
-        self.update_total_progress() # Update total progress after each file
+        self.update_total_progress(relative_path) # Update total progress after each file
 
 
   #############################################################################
   def count_dst_files_sz(self):
     """Calculate the actual size of output files after processing."""
     self.total_dst_sz = 0
+    self.total_src_sz = 0
     n_files = 0
 
     # Only count files that were actually processed in this session
-    for dst_file_path in self.processed_dst_files_set:
-      if os.path.exists(dst_file_path):
+    for src_file_path, dst_file_path in self.processed_dst_files_set:
+      if os.path.exists(dst_file_path) and os.path.exists(src_file_path):
         self.total_dst_sz += os.path.getsize(dst_file_path)
+        self.total_src_sz += os.path.getsize(src_file_path)
         n_files += 1
 
 
@@ -754,10 +838,10 @@ class AudioProcessor:
           break
         continue
       except Exception as e:
-        if not self.is_shutting_down:
-          msg = f"Error in worker {thread_index}: {e}"
-          self.status_update_queue.put(msg)
-          logging.exception(msg)
+#        if not self.is_shutting_down:
+#          msg = f"Error in worker {thread_index}: {e}"
+#          self.status_update_queue.put(msg)
+#          logging.exception(msg)
         self.queue.task_done()  # Ensure task is marked as done even on error
         break
 
@@ -845,6 +929,7 @@ class AudioProcessor:
     self.successfully_converted_files = 0
     self.skipped_files = 0
     self.error_files = 0
+    self.cancelled_files = 0
     self.processed_files_set.clear()
 
     # Remove existing progress bars, before creating new ones
@@ -942,12 +1027,15 @@ class AudioProcessor:
     # Add non-zero Error files
     if self.error_files:
       msg += f", {self.error_files} Errors"
+    # Add non-zero Cancelled files
+    if hasattr(self, 'cancelled_files') and self.cancelled_files:
+      msg += f", {self.cancelled_files} Cancelled"
     # Add Processing time
     if (processing_time != 0) and (self.skipped_files < self.total_files):
       msg += f" in {processing_time_str}."
     # Add Compression Ratio
     self.count_dst_files_sz()
-    if self.total_dst_sz:
+    if getattr(self, 'successfully_converted_files', 0) > 0 and getattr(self, 'total_dst_sz', 0) > 0 and hasattr(self, 'total_src_sz') and self.total_src_sz > 0:
       msg += f" Compression ratio {(self.total_src_sz / self.total_dst_sz):.2f}."
 
     # Display message
