@@ -15,14 +15,15 @@ import logging
 import re
 
 # Default values for the application
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DFLT_FFMPEG_PATH = "d:/PF/_Tools/ffmpeg/bin/ffmpeg.exe"  # Change this if your ffmpeg path is different.
 DFLT_SRC_DIR = ""
 DFLT_DST_DIR = ""
 DFLT_TEMPO = 1.8
 DFLT_N_THREADS = 4
 DFLT_N_THREADS_MAX = 16
-DFLT_CONFIG_FILE = "tempo_config.ini"
-DFLT_LOG_FILE = "tempo.log"
+DFLT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "tempo_config.ini")
+DFLT_LOG_FILE = os.path.join(SCRIPT_DIR, "tempo.log")
 AUD_EXT = ('.mp3', '.m4a', 'm4b', '.wav', '.ogg', '.flac', '.wav')
 DFLT_OVERWRITE_OPTION = "Skip existing files"  # Skip by default
 DFLT_USE_COMPRESSION_OPTION = False  # No compression by default
@@ -174,6 +175,15 @@ class AudioProcessor:
     self.is_shutting_down = False
 
 
+  def resolve_path(self, path_str):
+    """Resolves relative paths against the script's directory."""
+    if not path_str:
+      return ""
+    if os.path.isabs(path_str):
+      return os.path.normpath(path_str)
+    return os.path.normpath(os.path.join(SCRIPT_DIR, path_str))
+
+
   #############################################################################
   def load_config(self):
     """Loads config from tempo_config.ini or uses defaults if not found."""
@@ -254,7 +264,7 @@ class AudioProcessor:
     self.n_threads_combo.grid(row=3, column=1, sticky=tk.W)
 
     # File options in row 4
-    ttk.Label(self.master, text="File Options:").grid(row=4, column=0, sticky=tk.W, padx=5)
+    ttk.Label(self.master, text="File Overwrite Options:").grid(row=4, column=0, sticky=tk.W, padx=5)
     file_opts_frame = ttk.Frame(self.master)
     file_opts_frame.grid(row=4, column=1, sticky=tk.W)
 
@@ -296,7 +306,7 @@ class AudioProcessor:
   #############################################################################
   def browse_src_dir(self):
     """Opens a directory selection dialog for the source directory."""
-    directory = filedialog.askdirectory(initialdir=self.src_dir.get())
+    directory = filedialog.askdirectory(initialdir=self.resolve_path(self.src_dir.get()))
     if directory:  # Check if a directory was selected
       self.src_dir.set(os.path.normpath(directory))
 
@@ -304,7 +314,7 @@ class AudioProcessor:
   #############################################################################
   def browse_dst_dir(self):
     """Opens a directory selection dialog for the destination directory."""
-    directory = filedialog.askdirectory(initialdir=self.dst_dir.get())
+    directory = filedialog.askdirectory(initialdir=self.resolve_path(self.dst_dir.get()))
     if directory:  # Check if a directory was selected
       self.dst_dir.set(os.path.normpath(directory))
 
@@ -360,7 +370,8 @@ class AudioProcessor:
     overwrite_option = self.overwrite_options.get()
     dst_relative_path_base, ext = os.path.splitext(relative_path)
     dst_relative_path = dst_relative_path_base + '.mp3'
-    dst_file_path = os.path.join(self.dst_dir.get(), dst_relative_path)
+    resolved_dst_dir = self.resolve_path(self.dst_dir.get())
+    dst_file_path = os.path.join(resolved_dst_dir, dst_relative_path)
     if os.path.exists(dst_file_path):
       if overwrite_option == "Overwrite existing files":  # Overwrite existing
         msg = f"Overwriting: {relative_path}"
@@ -370,9 +381,9 @@ class AudioProcessor:
       elif overwrite_option == "Rename existing files":  # Rename instead of overwriting
         base, ext = os.path.splitext(relative_path)
         i = 1
-        while os.path.exists(os.path.join(self.dst_dir.get(), f"{base}({i}){ext}")):
+        while os.path.exists(os.path.join(resolved_dst_dir, f"{base}({i}){ext}")):
           i += 1
-        dst_file_path = os.path.join(self.dst_dir.get(), f"{base}({i}){ext}")
+        dst_file_path = os.path.join(resolved_dst_dir, f"{base}({i}){ext}")
         msg = f"Renaming: {relative_path} to {os.path.basename(dst_file_path)}"
         self.status_update_queue.put(msg)  # Use queue for status updates
         logging.debug(msg)
@@ -577,7 +588,8 @@ class AudioProcessor:
         self.update_total_progress() # Update total progress immediately for skipped files
         return  # Do not process skipped files
 
-      dst_file_path = os.path.join(self.dst_dir.get(), relative_path)
+      resolved_dst_dir = self.resolve_path(self.dst_dir.get())
+      dst_file_path = os.path.join(resolved_dst_dir, relative_path)
       dst_file_path = self.handle_overwrite(dst_file_path, relative_path)
       os.makedirs(os.path.dirname(dst_file_path), exist_ok=True)
 
@@ -675,7 +687,10 @@ class AudioProcessor:
 
     last_update_time = time.time()
 
-    for root, dirs, files in os.walk(src_dir):
+    resolved_src_dir = self.resolve_path(src_dir)
+    resolved_dst_dir = self.resolve_path(self.dst_dir.get())
+
+    for root, dirs, files in os.walk(resolved_src_dir):
       # If processing only current folder, clear dirs so os.walk doesn't traverse deeper
       if self.process_current_folder_var.get():
         dirs[:] = []
@@ -683,7 +698,7 @@ class AudioProcessor:
       for file in files:
         if file.lower().endswith(AUD_EXT):
           full_path = os.path.join(root, file)
-          relative_path = os.path.relpath(full_path, src_dir)
+          relative_path = os.path.relpath(full_path, resolved_src_dir)
           self.queue.put((full_path, relative_path))
           self.total_files += 1
           file_stat = os.stat(full_path)
@@ -692,7 +707,7 @@ class AudioProcessor:
           # Skip existing files
           overwrite_option = self.overwrite_options.get()
           dst_relative_path_base, ext = os.path.splitext(relative_path)
-          dst_file_path = os.path.join(self.dst_dir.get(), dst_relative_path_base + '.mp3')
+          dst_file_path = os.path.join(resolved_dst_dir, dst_relative_path_base + '.mp3')
           if os.path.exists(dst_file_path) and overwrite_option == "Skip existing files":
             self.skipped_files += 1
             self.file_info[relative_path] = {"duration": 0, "skipped": True, "errored": False}

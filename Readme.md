@@ -31,8 +31,10 @@ A Python GUI application for audio files batch processssing, changing their temp
 
 ## Configuration
 
-The application saves its configuration in `tempo_config.ini` file, which includes:
-- FFmpeg path
+The application saves its configuration in `tempo_config.ini`. This file is always resolved relative to the directory where the script is located.
+
+The configuration includes:
+- **FFmpeg path**: This must be an **absolute path** to the FFmpeg executable.
 - Last used input (source) and output (destination) directories
 - Tempo value
 - Number of processing threads
@@ -42,17 +44,18 @@ The application saves its configuration in `tempo_config.ini` file, which includ
 
 ## Usage
 
-1. Set the FFmpeg path (first time only)
-2. Select source directory containing audio files
-3. Select destination directory for processed files
-4. Adjust tempo value (0-2, where 1 is normal speed)
-5. Choose number of processing threads (1-DFLT_N_THREADS_MAX)
-6. Select file overwrite behavior:
+1. **Set FFmpeg path**: Provide the absolute path to your FFmpeg executable.
+2. **Select Source/Destination Directories**:
+   - Both **absolute** and **relative paths** are supported for source and destination directories.
+   - Relative paths are resolved starting from the directory where the script itself is located.
+3. Adjust tempo value (0-2, where 1 is normal speed)
+4. Choose number of processing threads (1-DFLT_N_THREADS_MAX)
+5. Select file overwrite behavior:
    - Skip existing files
    - Overwrite existing files
    - Rename existing files
-7. Optionally enable compression
-8. Click "Run" to start processing
+6. Optionally enable compression
+7. Click "Run" to start processing
 
 ## Processing Options
 
