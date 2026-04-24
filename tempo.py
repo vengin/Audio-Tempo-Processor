@@ -134,7 +134,8 @@ class AudioProcessor:
     self.total_files = 0
     self.files_completed_attempt = 0
     self.successfully_converted_files = 0
-    self.processed_files_lock = threading.Lock()  # Lock for thread-safe access
+    self.processed_files_lock = threading.Lock()  # Lock for thread-safe access to counters
+    self.processed_files_set_lock = threading.Lock()  # Separate lock for processed_files_set
     self.processed_seconds_arr = {}
     self.processed_seconds_arr_lock = threading.Lock()  # Lock for thread-safe access
     self.total_dst_seconds = 0  # Total size of all files
@@ -152,6 +153,8 @@ class AudioProcessor:
     self.processing_complete_event = threading.Event()
     self.active_processes = []  # Add list to track FFMPEG processes
     self.processes_lock = threading.Lock()  # Add lock for thread-safe access
+    self.active_threads_lock = threading.Lock()  # Lock for active_threads counter
+    self.finish_processing_lock = threading.Lock()  # Lock for finish_processing guard
 
     # Create GUI elements
     self.create_widgets()
@@ -508,8 +511,9 @@ class AudioProcessor:
     finally:
       progress_bar.set_progress(100)
       with self.processed_files_lock:
-        self.successfully_converted_files += 1 # Only for successful conversions
-        self.files_completed_attempt += 1 # Any file that finishes its worker processing path
+        if process is not None and process.poll() == 0:
+          self.successfully_converted_files += 1  # Only for successful conversions
+        self.files_completed_attempt += 1  # Any file that finishes its worker processing path
       self.master.update_idletasks()
       stderr_thread.join()
     return
@@ -535,7 +539,10 @@ class AudioProcessor:
       total_progress_percentage = min(100, total_progress_percentage)
       logging.debug(f"ttl_prcssd_seconds={int(total_processed_seconds)}, ttl_seconds={int(self.total_dst_seconds)}, prgrss={total_progress_percentage}")
 
-      total_progress_message = f"{total_progress_percentage}%  {self.files_completed_attempt}/{self.total_files}"
+      with self.processed_files_lock:
+        files_completed = self.files_completed_attempt
+
+      total_progress_message = f"{total_progress_percentage}%  {files_completed}/{self.total_files}"
 
       # Wrap GUI updates in try-except
       try:
@@ -546,8 +553,8 @@ class AudioProcessor:
         return
 
       # When all files processed, set progress to 100% (might be a bit smaller/larger otherwise)
-      if self.files_completed_attempt == self.total_files:
-        total_progress_message = f"100%  {self.files_completed_attempt}/{self.total_files}"
+      if files_completed == self.total_files:
+        total_progress_message = f"100%  {files_completed}/{self.total_files}"
         self.total_progress.set_progress(100)
         self.total_progress.set_display_text(total_progress_message)
         try:
@@ -561,10 +568,10 @@ class AudioProcessor:
   def process_file(self, src_file_path, relative_path, progress_bar):
     """Processes a single audio file, handling potential overwrites."""
 
-    if relative_path in self.processed_files_set:
-      return  # Skip if already processed
-
-    self.processed_files_set.add(relative_path)
+    with self.processed_files_set_lock:
+      if relative_path in self.processed_files_set:
+        return  # Skip if already processed
+      self.processed_files_set.add(relative_path)
     process = None  # Define process outside try block
     try:
       file_data = self.file_info[relative_path]
@@ -575,7 +582,7 @@ class AudioProcessor:
         progress_bar.set_progress(100)
         with self.processed_files_lock:
           self.files_completed_attempt += 1 # Count as completed attempt (unsuccessfully)
-        self.error_files += 1 # Increment error count once
+          self.error_files += 1 # Increment error count under lock
         self.update_total_progress() # Update total progress immediately for errored files
         return  # Do not process errored files
 
@@ -598,7 +605,8 @@ class AudioProcessor:
       final_dst_path = base + ".mp3"
 
       # Add the actual destination file path to the set
-      self.processed_dst_files_set.add(final_dst_path)
+      with self.processed_files_set_lock:
+        self.processed_dst_files_set.add(final_dst_path)
 
       # Get pre-calculated file info
       file_data = self.file_info[relative_path]
@@ -646,8 +654,8 @@ class AudioProcessor:
       msg = f"Error processing {relative_path}: {e}"
       logging.exception(msg)
       self.status_update_queue.put(msg)
-      self.error_files += 1
       with self.processed_files_lock:
+        self.error_files += 1
         self.files_completed_attempt += 1 # Count as completed attempt (with error)
       raise
     finally:
@@ -801,7 +809,7 @@ class AudioProcessor:
         self.queue.task_done()  # Ensure task is marked as done even on error
         break
 
-    with threading.Lock():  # Use a lock to safely decrement active_threads
+    with self.active_threads_lock:  # Use the shared lock to safely decrement active_threads
       self.active_threads -= 1
       if self.active_threads == 0 and not self.is_shutting_down:
         try:
@@ -957,9 +965,10 @@ class AudioProcessor:
   #############################################################################
   def finish_processing(self, calc_time=True):
     """Handles processing completion."""
-    if self.processing_complete:
-      return
-    self.processing_complete = True
+    with self.finish_processing_lock:
+      if self.processing_complete:
+        return
+      self.processing_complete = True
     #
     processing_time_str = ""
     if (calc_time == True):
